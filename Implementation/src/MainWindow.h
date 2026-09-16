@@ -8,7 +8,7 @@ private:
     
 public:
     MainWindow() : gui::Window(gui::Size(1200, 800)) {
-        this->setTitle("Port Logistics Simulation");
+        this->setTitle("Dungeon Game");
         this->setCentralView(&view);
         setResizable(true);
     }

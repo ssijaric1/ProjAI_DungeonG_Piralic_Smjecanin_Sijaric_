@@ -1,0 +1,156 @@
+\documentclass[12pt, a4paper]{article}
+
+% Essential packages for formatting
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% Page margins
+\geometry{
+    top=1in,
+    bottom=1in,
+    left=1in,
+    right=1in
+}
+
+% Formatting for code variables inline
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Title Information
+\title{\textbf{Dungeon Pathfinder}\\ \large Project Implementation Report}
+\author{Šehzada Sijarić \and Farah Piralić \and Asja Smječanin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+Dungeon Pathfinder is an interactive, grid-based game where the player navigates from a start point to an exit. The goal is to collect gold while avoiding hazards. We developed this application using the \code{natID} framework. It allows users to play the dungeon manually and then watch how different computer algorithms solve the exact same layout. The project implements six distinct search algorithms, an interactive quiz for mine tiles, and a system to visualize how these algorithms explore the map.
+
+This report documents the implementation of the Dungeon Pathfinder application, explaining the game mechanics, code structure, user interface, and visualization features.
+
+\section{Game Mechanics}
+The game takes place on a $10 \times 10$ tile grid with the following elements:
+\begin{itemize}
+    \item \textbf{Player start:} The player begins here and moves one tile at a time using the keyboard.
+    \item \textbf{Exit tile:} Reaching this tile ends the level. If the player has at least 20 gold, they win. If they have less, the game restarts.
+    \item \textbf{Reward tiles:} Give the player +10 gold.
+    \item \textbf{Bandit tiles:} Steal 50\% of the player's current gold.
+    \item \textbf{Mine tiles:} Trigger a quiz. A wrong answer takes away 5 gold; a correct answer lets the player pass safely.
+    \item \textbf{Empty tiles:} Have no effect.
+\end{itemize}
+
+Every new level places five rewards, five bandits and five mines on random empty tiles, so no two runs are identical.
+
+\section{Implementation and Architecture}
+
+\subsection{Game Logic and State Management}
+The main rules of the game are inside the \code{GameState} class (in \code{GameState.h}). We designed this to keep the game data separate from the graphics. To manage the dungeon, we use two different grid systems:
+
+\begin{enumerate}
+    \item \code{actualGrid[GRID\_SIZE][GRID\_SIZE]}: This integer array stores the real layout of the dungeon. We use constants to identify items: \code{EMPTY} (0), \code{PLAYER} (1), \code{REWARD} (2), \code{BANDIT} (3), \code{MINE} (4), and \code{EXIT} (5).
+    \item \code{displayGrid[GRID\_SIZE][GRID\_SIZE]}: This secondary array controls what the user sees. It supports extra visuals like \code{PATH\_VISUAL} (6) and \code{EXPLORED\_NODE} (7). This lets us draw the pathfinding lines without changing the actual game data.
+\end{enumerate}
+
+The \code{initializeGame} method sets up the level. It uses a random number generator to put the player on the left side and the exit on the right side. Then, the \code{placeRandomTile} function adds five rewards, bandits, and mines to random empty spots.
+
+The \code{movePlayer} method handles movement. If the player steps on a reward, they get gold. If they step on a bandit, they lose half their gold. If they step on a mine, the game pauses the logic and opens the quiz window. When the player reaches the exit, the game checks if they have the required 20 gold to win.
+
+We use a structure called \code{InitialState} to save the map exactly as it was at the start. This allows the algorithms to run on the clean map, even after the player has moved around and collected items.
+
+\subsection{Pathfinding Algorithm Implementation}
+The algorithms are in the \code{Algorithms.h} file. They are organized into \code{DungeonAlgorithms} (for standard searches) and \code{DungeonMDP} (for probability-based search). Each algorithm returns a \code{SearchResult} containing the path and the nodes visited.
+
+The four cost-aware searches share one cost table, defined in \code{getMoveCost}: rewards cost 0, empty tiles, the player tile and the exit cost 1, mines cost 8, and bandits cost 15. Because rewards are free and bandits are expensive, the cost-based algorithms naturally detour through gold and around thieves.
+
+\begin{itemize}
+    \item \textbf{Breadth-First Search (BFS):} This uses a queue to explore the grid layer by layer. It finds the shortest path based on the number of steps, but it ignores the gold cost of tiles. The \code{bfsSearch} function saves visited spots in \code{exploredNodes}.
+    \item \textbf{Depth-First Search (DFS):} This uses a stack. It explores as far as possible along each branch before backtracking. It is fast but does not guarantee the best path.
+    \item \textbf{Uniform Cost Search (UCS):} Implemented as \code{dijkstraSearch}, it uses a priority queue ordered by accumulated cost. Since every move has a positive cost, uniform cost search and Dijkstra's algorithm behave identically here, and the function always returns the cheapest route rather than the shortest one.
+    \item \textbf{A* Search:} This combines the movement cost with a ``Manhattan distance'' heuristic (a calculation of the distance to the goal). It balances the cost of the path with the estimated distance to the exit to find the best route efficiently.
+    \item \textbf{Greedy Best-First Search:} This only looks at the distance to the goal. It ignores the cost of tiles. It is fast, but it often makes mistakes because it will walk through bandits if that path looks shorter.
+    \item \textbf{Markov Decision Process (MDP):} This is in the \code{DungeonMDP} namespace. It handles uncertainty. It knows that mines have a 70\% chance of being safe (if answered correctly). The \code{MDPSolver} calculates the value of every state to find a policy that maximizes the expected reward.
+\end{itemize}
+
+\subsection{The MDP Solver in Detail}
+Unlike the five graph searches, the MDP does not treat a tile as a single node. A state is the pair (location, gold), with gold tracked up to \code{MAX\_GOLD\_TRACKED} $= 50$, which gives a state space of $10 \times 10 \times 51$ states and four actions per state. The solver runs value iteration with a discount factor \code{GAMMA} $= 0.99$, stopping once the largest value change in a sweep falls below \code{THETA} $= 0.0001$ or after \code{MAX\_ITERATIONS} $= 5000$ sweeps.
+
+Mines are the only stochastic transition: with probability \code{MINE\_SUCCESS\_PROBABILITY} $= 0.7$ the quiz is answered correctly and the gold is kept, and with the remaining probability the player loses 5 gold, so the expected value of entering a mine is a weighted average of both outcomes. Empty tiles carry a small negative reward so that wandering is discouraged, rewards are worth far more than the cost of reaching them, and reaching the exit is only valuable once the player holds the 20 gold needed to win. The result is a policy, not just a path: the route the solver draws is the one obtained by following that policy from the start state.
+
+\subsection{User Interface Architecture}
+The user interface begins with the \code{MainWindow} class, which inherits from \code{gui::Window}. This window establishes an initial size of $1200 \times 800$ pixels through the \code{gui::Size} constructor. The \code{setCentralView} method attaches the main application view, and \code{setResizable(true)} allows window resizing.
+
+The \code{MainView} class uses a \code{gui::GridLayout} with one row and one column to contain the \code{SimulationCanvas}.
+
+The \code{SimulationCanvas} class, inheriting from \code{gui::Canvas}, serves as the primary visualization and interaction component. The constructor enables keyboard events and primary clicks through the \code{gui::Canvas} base class initialization.
+
+Resource loading occurs through the \code{gui::Image} and \code{gui::Sound} constructors using resource identifiers like \code{":player"}, \code{":reward"}, and \code{":soundtrack"}.
+
+\subsection{Grid Rendering and Visualization}
+The \code{drawGameGrid} method draws the map. It calculates the size of the grid dimensions based on the left zone size, applying a 1\% margin, then draws grid lines using \code{gui::Shape} objects created with \code{createLines}. For each grid line, a \code{gui::Point} array defines the start and end coordinates, and \code{drawWire(td::ColorID::Gray)} renders the line with specified thickness.
+
+The content of the cells is drawn by \code{drawCellContent}. If the images load successfully, it draws the icons. If they fail to load, it draws colored rectangles as a backup (e.g., green for player, red for mines).
+
+We visualize the algorithms by drawing \code{EXPLORED\_NODE} tiles in blue. The final path is drawn using yellow and orange lines to create a glowing effect.
+
+\subsection{Control Panel Implementation}
+The right-side control panel, rendered by \code{drawControlPanel}, organizes all user interface elements. The algorithm selection dropdown uses a \code{gui::Rect} for the main button and individual \code{gui::Rect} objects for each dropdown item stored in \code{dropdownItemRects}. The dropdown expands and collapses based on the \code{dropdownExpanded} flag, with the arrow character changing between ``\^{}'' and ``v'' accordingly.
+
+The speed control features a button created with \code{gui::Shape::createRoundedRect} and \code{drawFill(td::ColorID::Moss)}. The \code{speedControlExpanded} flag controls whether the vertical slider appears. The slider itself uses a filled rectangle for the track and a smaller rectangle for the fill level representing current speed. The handle is drawn as a white rectangle with copper wire border.
+
+Control buttons are created through the \code{drawButton} helper function, which creates rounded rectangles with \code{gui::Shape::createRoundedRect} and fills them with either moss green when enabled or dim gray when disabled. Each button's rectangle is stored for hit detection in mouse event handling.
+
+The algorithm comparison table dynamically displays information about the currently selected algorithm. When an algorithm is selected, the \code{drawAlgorithmDetails} method shows its name, description, heuristic information, time complexity, space complexity, and execution time using formatted strings and \code{gui::DrawableString::draw}.
+
+\subsection{Quiz Popup System}
+The quiz is handled in \code{QuestionsPopUp.h}. We created a \code{DialogLogin} class based on the standard \code{gui::Dialog}.
+\begin{itemize}
+    \item \textbf{Text:} A \code{gui::Label} shows the question.
+    \item \textbf{Input:} The answers are mapped to standard buttons: \code{ID::OK}, \code{ID::Apply}, and \code{ID::Cancel}.
+    \item \textbf{Logic:} The \code{onClick} function checks if the button pressed matches the correct answer and shows an alert with the result.
+\end{itemize}
+The questions themselves are drawn from a pool of artificial intelligence and machine learning questions, so the hazard doubles as a short quiz on the course material. If the answer is correct, the game continues; if not, the player is punished by negative 5 gold.
+
+\subsection{Player Interaction and Events}
+\textbf{Keyboard:} The \code{onKeyPressed} method checks for arrow keys or WASD keys. It sends the direction to \code{gameState.movePlayer} to update the player's position.
+
+\textbf{Mouse:} The \code{onPrimaryButtonPressed} method detects clicks. It checks if the user clicked on buttons, the speed slider, or the dropdown menu. If an algorithm is selected, it calls \code{runAlgorithm}.
+
+\subsection{Animation and Visualization System}
+The visualization system makes the computer's search visible. It works in two phases inside the \code{updateAnimation} method:
+\begin{enumerate}
+    \item It reveals the \code{exploredNodes} (blue tiles) one by one.
+    \item Once exploration is done, it draws the \code{fullAlgorithmPath} (yellow line).
+\end{enumerate}
+This runs on a timer based on \code{animationSpeed}. There is also a \code{stepAnimation} method that lets the user advance one step at a time manually.
+
+\subsection{Sound System Integration}
+We use \code{gui::Sound} for audio. Effects play when specific events occur, such as collecting a reward or hitting a mine. The soundtrack loops continuously in the background using the \code{playSoundtrack} method, as long as the game is active.
+
+\subsection{Resources and Translations}
+All user-visible text, images and sounds are loaded through the natID resource system rather than being hard-coded. The \code{res/DevRes.xml} file declares the artwork and translation configurations, and \code{res/main.xml} holds the interface definition. Translations live in \code{res/tr/main\_XX.xml}, one file per language, and the application currently ships in eight: English, Bosnian, German, French, Spanish, Russian, Turkish and Chinese. The language is read from the stored application properties at startup in \code{main.cpp}, so the chosen translation persists between sessions.
+
+\subsection{Project Structure and Build}
+The repository follows the layout required for submission: \code{Docs/} contains this report, and \code{Implementation/} contains everything needed to build the game, namely \code{src/} for the sources, \code{res/} for resources and translations, and \code{installer/} for the packaging configuration. The build is driven by CMake: \code{CMakeLists.txt} sets the solution name and pulls in the SDK's \code{Common.cmake} and \code{natGUI.cmake}, while \code{dungeonGame.cmake} collects the sources and links the \code{mainUtils} and \code{natGUI} libraries. Because every path is resolved relative to the CMake list directory and the SDK is located through the user's home folder, the project builds unchanged on Windows, macOS and Linux. Ready-made installers for all three platforms are produced with the SDK's own SetupCollector from \code{installer/dungeonGame.xml}.
+
+\subsection{Team Distribution}
+To make the process of working on the project easier, we decided to somewhat correct our initial division of tasks.
+Each of the students contributed to the project equally. We worked together to come to the solution. Here are our specific contributions for building the project:
+\begin{itemize}
+    \item Šehzada Sijarić (19964): Implementing the grid layout and tile rendering, game state logic with pop-up quiz, and integrating the keyboard movements.
+    \item Farah Piralić (20106): Implementing the control panel, visualizing the algorithm movements, algorithm dropdown, control buttons, and comparison table.
+    \item Asja Smječanin (20012): Implementing the logic of BFS, DFS, Dijkstra algorithm, Greedy Best-First Search and A* Search. Making a custom MDP for solving the grid game. Overseeing final system integration and validation.
+\end{itemize}
+
+\section{Conclusion}
+The Dungeon Pathfinder project successfully creates a platform for comparing pathfinding algorithms. By separating the game logic from the visualization, users can experience the dungeon manually and then see how algorithms like A* or MDP solve the challenge. Running all six algorithms on the same saved starting layout makes the differences between them easy to observe: BFS and DFS ignore danger, the cost-based searches route around bandits, and the MDP weighs the risk of a mine against the gold it protects. The application provides clear visual feedback and intuitive controls.
+
+The source code of the project can be found at \url{https://github.com/ssijaric1/ProjAI_DungeonG_Piralic_Smjecanin_Sijaric_}.
+
+\end{document}
